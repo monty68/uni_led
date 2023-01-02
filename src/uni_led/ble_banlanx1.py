@@ -88,14 +88,14 @@ BANLANX1_EFFECTS: Final = {
     BANLANX1_EFFECT_SOUND + 1: UNILEDEffects.SOUND_RHYTHM_SPECTRUM_SINGLE,  # Colorable
     BANLANX1_EFFECT_SOUND + 2: UNILEDEffects.SOUND_RHYTHM_STARS_FULL,
     BANLANX1_EFFECT_SOUND + 3: UNILEDEffects.SOUND_RHYTHM_STARS_SINGLE,  # Colorable
-    BANLANX1_EFFECT_SOUND + 4: "Full Color Beat Injection",  # Directional
-    BANLANX1_EFFECT_SOUND + 5: "Beat Injection",  # Colorable & Directional
+    BANLANX1_EFFECT_SOUND + 4: "Sound - Full Color Beat Injection",  # Directional
+    BANLANX1_EFFECT_SOUND + 5: "Sound - Beat Injection",  # Colorable & Directional
     BANLANX1_EFFECT_SOUND + 6: UNILEDEffects.SOUND_ENERGY_GRADIENT,
     BANLANX1_EFFECT_SOUND + 7: UNILEDEffects.SOUND_ENERGY_SINGLE,  # Colorable
     BANLANX1_EFFECT_SOUND + 8: UNILEDEffects.SOUND_PULSE_GRADIENT,
     BANLANX1_EFFECT_SOUND + 9: UNILEDEffects.SOUND_PULSE_SINGLE,  # Colorable
-    BANLANX1_EFFECT_SOUND + 10: "Full Color Ripple",
-    BANLANX1_EFFECT_SOUND + 11: "Ripple",  # Colorable
+    BANLANX1_EFFECT_SOUND + 10: "Sound - Full Color Ripple",
+    BANLANX1_EFFECT_SOUND + 11: "Sound - Ripple",  # Colorable
     BANLANX1_EFFECT_SOUND + 12: UNILEDEffects.SOUND_LOVE_AND_PEACE,
     BANLANX1_EFFECT_SOUND + 13: UNILEDEffects.SOUND_CHRISTMAS,
     BANLANX1_EFFECT_SOUND + 14: UNILEDEffects.SOUND_HEARTBEAT,
@@ -115,6 +115,13 @@ BANLANX1_SCENES: Final = {
     0x08: "Scene 9",
 }
 
+_STATUS_FLAG_1 = 0x53
+_STATUS_FLAG_2 = 0x43
+_HEADER_LENGTH = 5
+_PACKET_NUMBER = 2
+_MESSAGE_LENGTH = 3
+_PAYLOAD_LENGTH = 4
+
 
 @dataclass(frozen=True)
 class _BANLANX1(UNILEDBLEModel):
@@ -132,22 +139,65 @@ class _BANLANX1(UNILEDBLEModel):
     ) -> UNILEDStatus | None:
         """Handle notification responses."""
 
-        if data[0] == 0x53 and data[1] == 0x43:
-            if data[2] == 0x01 and data[3] != 0x17:
-                # Do nothing (for now) on the first status packet
-                device.save_notification_data(data)
-                return None
+        if (
+            (len(data) > _HEADER_LENGTH)
+            and data[0] == _STATUS_FLAG_1
+            and data[1] == _STATUS_FLAG_2
+        ):
+            packet_number = data[_PACKET_NUMBER]
+            message_length = data[_MESSAGE_LENGTH]
+            payload_length = data[_PAYLOAD_LENGTH]
 
-            if data[2] == 0x02:
-                #
-                # Combine this data (minus first 5 bytes) with the previous
-                # notification data (also minus its first 5 bytes).
-                #
-                data = device.save_notification_data(
-                    device.last_notification_data[5:] + data[5:]
+            if packet_number == 1:
+                data = device.save_notification_data(data)
+                if message_length > payload_length:
+                    _LOGGER.debug(
+                        "%s: Packet 1 - payload size: %s, message length: %s",
+                        device.name,
+                        payload_length,
+                        message_length,
+                    )
+                    return None
+                data = data[_HEADER_LENGTH:]
+            else:
+
+                if (
+                    len((last := device.last_notification_data)) == 0
+                    or last[_PACKET_NUMBER] != packet_number - 1
+                ):
+                    _LOGGER.debug("%s: Skip out of sequence Packet!", device.name)
+                    device.save_notification_data(())
+                    return None
+
+                payload_so_far = last[_PAYLOAD_LENGTH] + data[_PAYLOAD_LENGTH]
+
+                _LOGGER.debug(
+                    "%s: Packet %s - payload size: %s, payload so far: %s, message length: %s (%s)",
+                    device.name,
+                    packet_number,
+                    payload_length,
+                    payload_so_far,
+                    message_length,
+                    last[_MESSAGE_LENGTH],
                 )
 
-                # This leaves a 24 byte array with the following layout:
+                if payload_so_far < last[_MESSAGE_LENGTH]:
+                    last[_PACKET_NUMBER] = packet_number
+                    last[_PAYLOAD_LENGTH] = payload_so_far
+                    device.save_notification_data(last + data[_HEADER_LENGTH:])
+                    return None
+
+                if (
+                    payload_so_far > message_length
+                    or message_length != last[_MESSAGE_LENGTH]
+                ):
+                    _LOGGER.debug("%s: Bad Packet!", device.name)
+                    last[_MESSAGE_LENGTH] = 0
+                    return None
+
+                data = last[_HEADER_LENGTH:] + data[_HEADER_LENGTH:]
+
+            if len(data) == message_length:
                 #
                 # 0  = Channel 1 Power State
                 # 1  = Channel 1 Effect
@@ -174,65 +224,56 @@ class _BANLANX1(UNILEDBLEModel):
                 # 22 = Unknown
                 # 23 = Auto Mode (0x00 = Off, 0x01 = On)
                 #
-                if data[3] == 0x19:
-                    return None
+                _LOGGER.debug("%s: Good Status Message: %s", device.name, data.hex())
 
-            elif data[2] == 0x03:
-                #
-                # Combine this data (minus first 5 bytes) with the previous
-                # notification data saved as part of 0x02 packet.
-                #
-                data = device.save_notification_data(
-                    device.last_notification_data + data[5:]
+                device.channels[1].set_status(
+                    UNILEDStatus(
+                        power=data[0] == 0x01,
+                        effect=data[1],
+                        fxtype=self.codeof_channel_effect_type(
+                            device.channels[1], data[1]
+                        ),
+                        level=data[3],
+                        speed=data[4],
+                        length=data[5],
+                        direction=data[6],
+                        rgb=(data[7], data[8], data[9]),
+                        gain=data[10],
+                        chip_order=data[2],
+                    )
                 )
-            else:
-                return None
 
-            device.channels[1].set_status(
-                UNILEDStatus(
-                    power=data[0] == 0x01,
-                    effect=data[1],
-                    fxtype=self.codeof_channel_effect_type(device.channels[1], data[1]),
-                    level=data[3],
-                    speed=data[4],
-                    length=data[5],
-                    direction=data[6],
-                    rgb=(data[7], data[8], data[9]),
-                    gain=data[10],
-                    chip_order=data[2],
+                device.channels[2].set_status(
+                    UNILEDStatus(
+                        power=data[11] == 0x01,
+                        effect=data[12],
+                        fxtype=self.codeof_channel_effect_type(
+                            device.channels[2], data[12]
+                        ),
+                        level=data[14],
+                        speed=data[15],
+                        length=data[16],
+                        direction=data[17],
+                        rgb=(data[18], data[19], data[20]),
+                        gain=data[21],
+                        chip_order=data[13],
+                    )
                 )
-            )
 
-            device.channels[2].set_status(
-                UNILEDStatus(
-                    power=data[11] == 0x01,
-                    effect=data[12],
-                    fxtype=self.codeof_channel_effect_type(
-                        device.channels[2], data[12]
-                    ),
-                    level=data[14],
-                    speed=data[15],
-                    length=data[16],
-                    direction=data[17],
-                    rgb=(data[18], data[19], data[20]),
-                    gain=data[21],
-                    chip_order=data[13],
+                master_power = data[0] + data[11]
+                mode = data[message_length - 1]
+                return UNILEDStatus(
+                    power=master_power,
+                    mode=mode if master_power else BANLANX1_MODE_OFF,
+                    effect=BANLANX1_SCENE_NONE,
+                    level=cast(int, (data[3] + data[14]) / 2),
+                    extra={
+                        "unknown": data[22] if message_length == 24 else None,
+                    },
                 )
-            )
 
-            master_power = data[0] + data[11]
-            return UNILEDStatus(
-                power=master_power,
-                mode=data[23] if master_power else BANLANX1_MODE_OFF,
-                effect=BANLANX1_SCENE_NONE,
-                level=cast(int, (data[3] + data[14]) / 2),
-                extra={
-                    "unknown": data[22],
-                },
-            )
-
-        # Getting here means a notification has not changed the state
-        #
+        _LOGGER.debug("%s: Unknown/Invalid Packet!", device.name)
+        device.save_notification_data(())
         return None
 
     ##
