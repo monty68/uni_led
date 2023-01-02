@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "uni_led"
-version = "0.5.0"
+version = "1.0.0"
 description = "Universal Lighting Controllers"
 authors = ["Phil Monteith"]
 license = "Apache Software License 2.0"
