@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
-from .models_db import {
+from .models_db import (
     UNILED_TRANSPORT_BLE,
     UNILED_TRANSPORT_NET,
-}
+)
 
-from .ble_device import UNILEDBLE
+from .classes import UNILEDDevice, UNILEDChannel
+from .artifacts import UNILEDModelType, UNILEDEffectDirection
+from .ble_device import UNILEDBLE, BLEAK_EXCEPTIONS
 from .net_device import UNILEDNET
 
 __all__ = [
+    "BLEAK_EXCEPTIONS"
     "UNILED_TRANSPORT_BLE",
-    "UNILED_TRANSPORT_NET",
     "UNILEDBLE",
+    "UNILED_TRANSPORT_NET",
     "UNILEDNET",
+    "UNILEDDevice",
+    "UNILEDChannel",
+    "UNILEDModelType", 
+    "UNILEDEffectDirection"
 ]
